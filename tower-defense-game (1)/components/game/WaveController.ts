@@ -31,6 +31,8 @@ export class WaveController {
   private spawnQueue: { enemyType: string; delay: number }[] = []
   private spawnTimer: NodeJS.Timeout | null = null
   private path: PathPoint[] = []
+  // Snapshot used for the currently running wave to avoid mid-wave path changes
+  private wavePath: PathPoint[] = []
   private currentLevel = 1
   private currentWaveConfig: WaveConfig | null = null
   private onEnemySpawned: (enemy: SpawnedEnemy) => void
@@ -74,6 +76,9 @@ export class WaveController {
     this.enemiesDefeated = 0
     this.enemiesLeaked = 0
     this.bossSpawned = false
+
+    // Freeze the path for this wave so spawns and movement use a stable snapshot
+    this.wavePath = this.path && this.path.length > 0 ? JSON.parse(JSON.stringify(this.path)) : []
 
     // Generate wave configuration
     this.currentWaveConfig = this.generateWaveConfig(level)
@@ -150,12 +155,12 @@ export class WaveController {
   }
 
   private spawnBoss(bossType: string): void {
-    if (this.path.length === 0) {
+    if (this.wavePath.length === 0) {
       console.error("Cannot spawn boss: path is empty")
       return
     }
 
-    const startPoint = this.path[0]
+    const startPoint = this.wavePath[0]
     const bossData = BOSS_TYPES[bossType]
 
     if (!bossData) {
@@ -209,12 +214,12 @@ export class WaveController {
 
   private spawnEnemy(enemyType: string): void {
     try {
-      if (!this.path || this.path.length === 0) {
+      if (!this.wavePath || this.wavePath.length === 0) {
         console.error("Cannot spawn enemy: path is empty")
         return
       }
 
-      const startPoint = this.path[0]
+      const startPoint = this.wavePath[0]
       if (!startPoint) {
         console.error("Invalid start point in path")
         return
@@ -309,6 +314,7 @@ export class WaveController {
     this.bossSpawned = false
     this.totalEnemiesInWave = 0
     this.currentWaveConfig = null
+    this.wavePath = []
   }
 
   public setPath(path: PathPoint[]): void {
@@ -320,10 +326,17 @@ export class WaveController {
     try {
       // Make a deep copy to ensure we don't have reference issues
       this.path = JSON.parse(JSON.stringify(path))
+      // Do not mutate an in-progress wave's path; it will take effect next wave
       console.log("Path updated:", this.path.length, "points")
     } catch (error) {
       console.error("Error updating path:", error)
     }
+  }
+
+  // Expose the stable path used by the current wave (read-only copy)
+  public getWavePath(): PathPoint[] {
+    const src = this.isWaveActive && this.wavePath.length > 0 ? this.wavePath : this.path
+    return src ? JSON.parse(JSON.stringify(src)) : []
   }
 
   public getActiveEnemies(): SpawnedEnemy[] {

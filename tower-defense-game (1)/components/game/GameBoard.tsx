@@ -64,6 +64,8 @@ export default function GameBoard({
   const [enemiesRemaining, setEnemiesRemaining] = useState(0)
   const [totalEnemiesInWave, setTotalEnemiesInWave] = useState(0)
   const { balance, setBalance } = useWallet()
+  // Stable snapshot of the path used during an active wave
+  const [activePath, setActivePath] = useState<PathPoint[]>([])
 
   // Reference to store the wave controller
   const waveControllerRef = useRef<WaveController | null>(null)
@@ -129,11 +131,12 @@ export default function GameBoard({
 
   // Update the path in the wave controller when pathPoints changes
   useEffect(() => {
-    if (waveControllerRef.current && pathPoints.length > 0) {
+    // Only update controller path when not in an active wave
+    if (!isWaveActive && waveControllerRef.current && pathPoints.length > 0) {
       console.log("Updating path in wave controller:", pathPoints.length, "points")
       waveControllerRef.current.setPath([...pathPoints])
     }
-  }, [pathPoints])
+  }, [pathPoints, isWaveActive])
 
   // Update enemies remaining count
   useEffect(() => {
@@ -166,6 +169,8 @@ export default function GameBoard({
 
       // Ensure the wave controller has the latest path
       waveControllerRef.current.setPath([...pathPoints])
+      // Freeze movement path locally so enemies don't pick up mid-wave edits
+      setActivePath([...pathPoints])
 
       // Small delay to ensure path is updated before starting the wave
       setTimeout(() => {
@@ -212,9 +217,10 @@ export default function GameBoard({
     placeCastleAtPathEnd()
   }
 
-  // Enemy movement system
+  // Enemy movement system (uses stable activePath when present)
   useEffect(() => {
-    if (!running || pathPoints.length < 2) return
+    const pathForMovement = activePath.length >= 2 ? activePath : pathPoints
+    if (!running || pathForMovement.length < 2) return
 
     const moveInterval = setInterval(() => {
       setEnemies((prevEnemies) => {
@@ -224,7 +230,7 @@ export default function GameBoard({
             const currentIndex = enemy.pathIndex
 
             // If at the end of the path, damage castle and remove enemy
-            if (currentIndex >= pathPoints.length - 1) {
+            if (currentIndex >= pathForMovement.length - 1) {
               // Calculate damage based on enemy type
               const damage = enemy.damage || (enemy.enemyType.includes("boss") ? 5 : 1)
               setCastleHealth((prev) => Math.max(0, prev - damage))
@@ -239,7 +245,7 @@ export default function GameBoard({
 
             // Move to the next point in the path
             const nextIndex = currentIndex + 1
-            const nextPoint = pathPoints[nextIndex]
+            const nextPoint = pathForMovement[nextIndex]
 
             // Calculate speed factor - different enemies move at different speeds
             const speedFactor = enemy.speed || 1
@@ -257,7 +263,7 @@ export default function GameBoard({
     }, 500) // Base movement speed - can be adjusted by enemy speed factor
 
     return () => clearInterval(moveInterval)
-  }, [running, pathPoints])
+  }, [running, pathPoints, activePath])
 
   // Listen for fireProjectile events from towers
   useEffect(() => {
@@ -400,6 +406,8 @@ export default function GameBoard({
       // Make sure the controller is updated with the latest path
       waveControllerRef.current.setPath([...pathPoints])
     }
+    // Clear the active snapshot so next wave takes any edits
+    setActivePath([])
   }
 
   // Check if current wave is a boss wave
