@@ -33,6 +33,12 @@ export const SOUND_EFFECTS = {
 
 export type SoundEffectType = keyof typeof SOUND_EFFECTS
 
+type PlayingSound = {
+  source: AudioBufferSourceNode
+  gain: GainNode
+  baseVolume: number
+}
+
 class SoundManager {
   private audioContext: AudioContext | null = null
   private soundBuffers: Map<SoundEffectType, AudioBuffer> = new Map()
@@ -40,8 +46,9 @@ class SoundManager {
   private loadPromises: Map<SoundEffectType, Promise<AudioBuffer>> = new Map()
   private isMuted = false
   private volume = 0.5 // Default volume (0-1)
-  private currentlyPlaying: Map<string, GainNode> = new Map()
+  private currentlyPlaying: Map<string, PlayingSound> = new Map()
   private isClient: boolean
+  private interactionListenersAttached = false
 
   constructor() {
     // Check if we're in a browser environment
@@ -50,12 +57,14 @@ class SoundManager {
     // Only initialize if we're in a browser
     if (this.isClient) {
       // Initialize audio context on first user interaction
-      this.initOnUserInteraction()
+      this.attachInteractionListeners()
     }
   }
 
-  private initOnUserInteraction() {
-    if (!this.isClient) return
+  private attachInteractionListeners() {
+    if (!this.isClient || this.interactionListenersAttached) return
+
+    this.interactionListenersAttached = true
 
     const initAudio = () => {
       if (!this.audioContext) {
@@ -70,6 +79,7 @@ class SoundManager {
           document.removeEventListener("click", initAudio)
           document.removeEventListener("touchstart", initAudio)
           document.removeEventListener("keydown", initAudio)
+          this.interactionListenersAttached = false
         } catch (error) {
           console.error("Failed to initialize audio context:", error)
         }
@@ -82,12 +92,39 @@ class SoundManager {
     document.addEventListener("keydown", initAudio)
   }
 
+  private async getOrCreateContext(): Promise<AudioContext | null> {
+    if (!this.isClient) return null
+
+    if (!this.audioContext) {
+      try {
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+      } catch (error) {
+        console.error("Unable to create audio context", error)
+        this.attachInteractionListeners()
+        return null
+      }
+    }
+
+    if (this.audioContext.state === "suspended") {
+      try {
+        await this.audioContext.resume()
+      } catch (error) {
+        console.warn("Failed to resume audio context", error)
+        this.attachInteractionListeners()
+      }
+    }
+
+    return this.audioContext
+  }
+
   /**
    * Preload multiple sound effects
    */
   public preloadSounds(soundTypes: SoundEffectType[]): void {
     if (!this.isClient) return
-    soundTypes.forEach((type) => this.loadSound(type))
+    soundTypes.forEach((type) => {
+      void this.loadSound(type)
+    })
   }
 
   /**
@@ -98,8 +135,9 @@ class SoundManager {
       return Promise.reject(new Error("Cannot load sounds on server"))
     }
 
-    if (!this.audioContext) {
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const audioContext = await this.getOrCreateContext()
+    if (!audioContext) {
+      return Promise.reject(new Error("Audio context unavailable"))
     }
 
     // Return cached buffer if already loaded
@@ -122,7 +160,7 @@ class SoundManager {
         }
         return response.arrayBuffer()
       })
-      .then((arrayBuffer) => this.audioContext!.decodeAudioData(arrayBuffer))
+      .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
       .then((audioBuffer) => {
         this.soundBuffers.set(soundType, audioBuffer)
         this.loadedSounds.add(soundType)
@@ -154,22 +192,28 @@ class SoundManager {
       pan?: number // -1 (left) to 1 (right)
     } = {},
   ): Promise<string | null> {
-    if (!this.isClient || this.isMuted || !this.audioContext) {
+    if (!this.isClient || this.isMuted) {
       return null
     }
 
     try {
+      const audioContext = await this.getOrCreateContext()
+      if (!audioContext) {
+        return null
+      }
+
       const audioBuffer = await this.loadSound(soundType)
 
       // Create audio source
-      const source = this.audioContext.createBufferSource()
+      const source = audioContext.createBufferSource()
       source.buffer = audioBuffer
       source.loop = options.loop || false
       source.playbackRate.value = options.playbackRate || 1
 
       // Create gain node for volume control
-      const gainNode = this.audioContext.createGain()
-      gainNode.gain.value = (options.volume !== undefined ? options.volume : 1) * this.volume
+      const gainNode = audioContext.createGain()
+      const baseVolume = options.volume !== undefined ? options.volume : 1
+      gainNode.gain.value = baseVolume * this.volume
 
       // Create stereo panner if pan is specified
       if (options.pan !== undefined) {
@@ -182,12 +226,16 @@ class SoundManager {
       }
 
       // Connect to destination and play
-      gainNode.connect(this.audioContext.destination)
-      source.start(0)
+      gainNode.connect(audioContext.destination)
+      source.start()
 
       // Generate unique ID for this sound instance
       const id = `${soundType}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-      this.currentlyPlaying.set(id, gainNode)
+      this.currentlyPlaying.set(id, {
+        source,
+        gain: gainNode,
+        baseVolume,
+      })
 
       // Remove from playing list when done
       source.onended = () => {
@@ -207,14 +255,22 @@ class SoundManager {
   public stopSound(id: string): void {
     if (!this.isClient) return
 
-    const gainNode = this.currentlyPlaying.get(id)
-    if (gainNode && this.audioContext) {
+    const playing = this.currentlyPlaying.get(id)
+    if (playing && this.audioContext) {
+      const { gain, source } = playing
       // Fade out to avoid clicks
       const now = this.audioContext.currentTime
-      gainNode.gain.linearRampToValueAtTime(0, now + 0.1)
+      gain.gain.cancelScheduledValues(now)
+      gain.gain.setValueAtTime(gain.gain.value, now)
+      gain.gain.linearRampToValueAtTime(0, now + 0.1)
+      try {
+        source.stop(now + 0.11)
+      } catch (error) {
+        console.warn("Error stopping sound", error)
+      }
       setTimeout(() => {
         this.currentlyPlaying.delete(id)
-      }, 100)
+      }, 150)
     }
   }
 
@@ -224,7 +280,7 @@ class SoundManager {
   public stopAllSounds(): void {
     if (!this.isClient) return
 
-    this.currentlyPlaying.forEach((gainNode, id) => {
+    this.currentlyPlaying.forEach((_, id) => {
       this.stopSound(id)
     })
   }
@@ -238,8 +294,8 @@ class SoundManager {
     this.volume = Math.max(0, Math.min(1, volume))
 
     // Update volume of currently playing sounds
-    this.currentlyPlaying.forEach((gainNode) => {
-      gainNode.gain.value = this.volume
+    this.currentlyPlaying.forEach(({ gain, baseVolume }) => {
+      gain.gain.value = baseVolume * this.volume
     })
   }
 
@@ -261,11 +317,9 @@ class SoundManager {
    * (browsers often suspend audio context until user interaction)
    */
   public resumeAudioContext(): void {
-    if (!this.isClient || !this.audioContext) return
+    if (!this.isClient) return
 
-    if (this.audioContext.state === "suspended") {
-      this.audioContext.resume()
-    }
+    void this.getOrCreateContext()
   }
 }
 
